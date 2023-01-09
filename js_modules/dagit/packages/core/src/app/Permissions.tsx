@@ -46,7 +46,10 @@ const DEFAULT_PERMISSIONS = {
   disabledReason: 'Disabled by your administrator',
 };
 
-const extractPermissions = (permissions: PermissionFragmentFragment[]) => {
+export const extractPermissions = (
+  permissions: PermissionFragmentFragment[],
+  fallback: PermissionFragmentFragment[] = [],
+) => {
   const permsMap: PermissionsFromJSON = {};
   for (const item of permissions) {
     permsMap[item.permission] = {
@@ -55,59 +58,121 @@ const extractPermissions = (permissions: PermissionFragmentFragment[]) => {
     };
   }
 
+  const fallbackMap: PermissionsFromJSON = {};
+  for (const item of fallback) {
+    fallbackMap[item.permission] = {
+      enabled: item.value,
+      disabledReason: item.disabledReason || '',
+    };
+  }
+
+  const permissionOrFallback = (key: keyof PermissionsFromJSON) => {
+    return permsMap[key] || fallbackMap[key] || DEFAULT_PERMISSIONS;
+  };
+
   return {
-    canLaunchPipelineExecution: permsMap.launch_pipeline_execution || DEFAULT_PERMISSIONS,
-    canLaunchPipelineReexecution: permsMap.launch_pipeline_reexecution || DEFAULT_PERMISSIONS,
-    canStartSchedule: permsMap.start_schedule || DEFAULT_PERMISSIONS,
-    canStopRunningSchedule: permsMap.stop_running_schedule || DEFAULT_PERMISSIONS,
-    canStartSensor: permsMap.edit_sensor || DEFAULT_PERMISSIONS,
-    canStopSensor: permsMap.edit_sensor || DEFAULT_PERMISSIONS,
-    canTerminatePipelineExecution: permsMap.terminate_pipeline_execution || DEFAULT_PERMISSIONS,
-    canDeletePipelineRun: permsMap.delete_pipeline_run || DEFAULT_PERMISSIONS,
-    canReloadRepositoryLocation: permsMap.reload_repository_location || DEFAULT_PERMISSIONS,
-    canReloadWorkspace: permsMap.reload_workspace || DEFAULT_PERMISSIONS,
-    canWipeAssets: permsMap.wipe_assets || DEFAULT_PERMISSIONS,
-    canLaunchPartitionBackfill: permsMap.launch_partition_backfill || DEFAULT_PERMISSIONS,
-    canCancelPartitionBackfill: permsMap.cancel_partition_backfill || DEFAULT_PERMISSIONS,
+    canLaunchPipelineExecution: permissionOrFallback('launch_pipeline_execution'),
+    canLaunchPipelineReexecution: permissionOrFallback('launch_pipeline_reexecution'),
+    canStartSchedule: permissionOrFallback('start_schedule'),
+    canStopRunningSchedule: permissionOrFallback('stop_running_schedule'),
+    canStartSensor: permissionOrFallback('edit_sensor'),
+    canStopSensor: permissionOrFallback('edit_sensor'),
+    canTerminatePipelineExecution: permissionOrFallback('terminate_pipeline_execution'),
+    canDeletePipelineRun: permissionOrFallback('delete_pipeline_run'),
+    canReloadRepositoryLocation: permissionOrFallback('reload_repository_location'),
+    canReloadWorkspace: permissionOrFallback('reload_workspace'),
+    canWipeAssets: permissionOrFallback('wipe_assets'),
+    canLaunchPartitionBackfill: permissionOrFallback('launch_partition_backfill'),
+    canCancelPartitionBackfill: permissionOrFallback('cancel_partition_backfill'),
   };
 };
 
 export type PermissionsMap = ReturnType<typeof extractPermissions>;
 
 export const PermissionsContext = React.createContext<{
-  data: PermissionFragmentFragment[];
+  fallbackPermissions: PermissionFragmentFragment[];
+  locationPermissions: Record<string, PermissionFragmentFragment[]>;
   loading: boolean;
-}>({data: [], loading: true});
+}>({fallbackPermissions: [], locationPermissions: {}, loading: true});
 
 export const PermissionsProvider: React.FC = (props) => {
   const {data, loading} = useQuery(PERMISSIONS_QUERY, {
     fetchPolicy: 'cache-first', // Not expected to change after initial load.
   });
-  const value = React.useMemo(
-    () => ({
-      data: data?.permissions || [],
+
+  const value = React.useMemo(() => {
+    const locationEntries =
+      data?.workspaceOrError.__typename === 'Workspace'
+        ? data.workspaceOrError.locationEntries
+        : [];
+
+    const locationMap = {};
+    locationEntries.forEach((locationEntry) => {
+      const {name, permissions} = locationEntry;
+      locationMap[name] = permissions;
+    });
+
+    return {
+      fallbackPermissions: data?.unscopedPermissions || [],
+      locationPermissions: locationMap,
       loading,
-    }),
-    [data, loading],
-  );
+    };
+  }, [data, loading]);
   return <PermissionsContext.Provider value={value}>{props.children}</PermissionsContext.Provider>;
 };
 
-export const usePermissions = () => {
-  const {data, loading} = React.useContext(PermissionsContext);
-  return React.useMemo(
-    () => ({
-      ...extractPermissions(data),
+/**
+ * Retrieve a permission that is intentionally unscoped.
+ */
+export const useUnscopedPermissions = () => {
+  const {fallbackPermissions, loading} = React.useContext(PermissionsContext);
+  return React.useMemo(() => {
+    return {
+      ...extractPermissions(fallbackPermissions),
       loading,
-    }),
-    [data, loading],
-  );
+    };
+  }, [fallbackPermissions, loading]);
 };
+
+/**
+ * Retrieve a permission that is scoped to a specific code location. The unscoped permission set
+ * will be used as a fallback, so that if the permission is not defined for that location, we still
+ * have a valid value.
+ */
+export const usePermissionsForLocation = (locationName: string | null | undefined) => {
+  const {fallbackPermissions, locationPermissions, loading} = React.useContext(PermissionsContext);
+  return React.useMemo(() => {
+    const targetPermissions = locationName
+      ? locationPermissions[locationName]
+      : fallbackPermissions;
+    return {
+      ...extractPermissions(targetPermissions || [], fallbackPermissions),
+      loading,
+    };
+  }, [locationPermissions, locationName, fallbackPermissions, loading]);
+};
+
+// todo dish: Update callsites to either location-based perms or intentionally unscoped perms.
+export const usePermissionsDEPRECATED = useUnscopedPermissions;
+
+// todo dish: Temporary to pass Cloud build. Delete after Cloud callsites are updated.
+export const usePermissions = useUnscopedPermissions;
 
 const PERMISSIONS_QUERY = graphql(`
   query PermissionsQuery {
-    permissions {
+    unscopedPermissions: permissions {
       ...PermissionFragment
+    }
+    workspaceOrError {
+      ... on Workspace {
+        locationEntries {
+          id
+          name
+          permissions {
+            ...PermissionFragment
+          }
+        }
+      }
     }
   }
 
